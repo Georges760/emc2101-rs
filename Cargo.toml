@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 name = "emc2101"
 repository = "https://github.com/Georges760/emc2101-rs"
 rust-version = "1.71.1"
-version = "0.4.1"
+version = "1.0.0"
 
 [dependencies]
 defmt = { version = "0.3", optional = true }

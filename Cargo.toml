@@ -19,10 +19,10 @@ fugit = "0.3"
 heapless = "0.8"
 log = { version = "0.4", optional = true }
 maybe-async-cfg = "0.2"
+rustversion = "1.0"
 
 [features]
 async = ["dep:embedded-hal-async"]
-core-error = []                                              # bump MSRV to 1.81.0
 default = ["sync"]
 defmt-03 = ["dep:defmt", "fugit/defmt", "heapless/defmt-03"]
 sync = ["dep:embedded-hal"]

@@ -511,14 +511,11 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     pub async fn set_fan_lut(
         &mut self,
         lut: Vec<Level, 8>,
-        hysteresis: u8,
+        hysteresis: BoundedU8<0, 31>,
     ) -> Result<&mut Self, I::Error> {
         trace!("set_fan_lut");
         if lut.is_empty() {
             return Err(Error::InvalidSize);
-        }
-        if hysteresis > 31 {
-            return Err(Error::InvalidValue);
         }
         let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
         // FanConfig[5] PROG == 0 :
@@ -533,12 +530,6 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         }
         let mut last_temp = <BoundedU8<0, 127>>::new(0).unwrap();
         for (index, level) in (0_u8..).zip(lut.iter()) {
-            if level.temp > 127 {
-                return Err(Error::InvalidValue);
-            }
-            if level.step > 100 {
-                return Err(Error::InvalidValue);
-            }
             if level.temp <= last_temp {
                 return Err(Error::InvalidSorting);
             }
@@ -556,7 +547,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         }
         // FanControlLUTHysteresis determines the amount of hysteresis applied to the temperature
         // inputs of the fan control Fan Control Look-Up Table.
-        self.write_reg(Register::FanControlLUTHysteresis, hysteresis)
+        self.write_reg(Register::FanControlLUTHysteresis, hysteresis.get())
             .await?;
         // Clear FanConfig[5] PROG : the FanSetting Register and Fan Control Look-Up Table
         // Registers are read-only and the Fan Control Look-Up Table Registers will be used.

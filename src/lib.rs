@@ -135,7 +135,7 @@ impl From<u8> for Status {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Level {
     pub temp: BoundedU8<0, 127>,
-    pub step: BoundedU8<0, 64>,
+    pub step: BoundedU8<0, 63>,
 }
 
 /// Manual implementation of defmt 'Format' trait, since BoundedU8 does not implement it.

@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 name = "emc2101"
 repository = "https://github.com/Georges760/emc2101-rs"
 rust-version = "1.71.1"
-version = "1.0.0"
+version = "2.0.0"
 
 [dependencies]
 bounded-integer = "0.6.0"

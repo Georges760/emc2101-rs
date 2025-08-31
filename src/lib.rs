@@ -6,6 +6,7 @@
 pub(crate) mod fmt;
 
 mod error;
+use bounded_integer::BoundedU8;
 pub use error::{Error, Result};
 
 #[cfg(not(any(feature = "sync", feature = "async")))]
@@ -469,14 +470,10 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     }
 
     /// set_fan_power set the FAN power in percent (for both modes PWM/DAC).
-    /// The 'power' must be between 0 and 100%.
+    /// The 'power' must be between 0 and 64.
     /// If Look-up Table was enabled, it will be disabled and the fixed power value will be used.
-    pub async fn set_fan_power(&mut self, percent: u8) -> Result<&mut Self, I::Error> {
+    pub async fn set_fan_power(&mut self, val: BoundedU8<0, 63>) -> Result<&mut Self, I::Error> {
         trace!("set_fan_power");
-        if percent > 100 {
-            error!("Invalid Fan Power.");
-            return Err(Error::InvalidValue);
-        }
         let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
         // FanConfig[5] PROG == 0 :
         // the FanSetting Register and Fan Control Look-Up Table Registers are read-only.
@@ -487,12 +484,11 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             self.write_reg(Register::FanConfig, fan_config | 0x20)
                 .await?;
         }
-        let val: u8 = percent * 64 / 100;
         // The FanSetting Register drives the fan driver when the Fan Control Look-Up
         // Table is not used.
         // Any data written to the FanSetting register is applied immediately to the
         // fan driver (PWM or DAC).
-        self.write_reg(Register::FanSetting, val).await?;
+        self.write_reg(Register::FanSetting, val.get()).await?;
         Ok(self)
     }
 

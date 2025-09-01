@@ -32,7 +32,7 @@ const EMC2101R_PRODUCT_ID: u8 = 0x28;
 
 /// EMC2101 sensor's Product.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Product {
     EMC2101,
     EMC2101R,
@@ -40,7 +40,7 @@ pub enum Product {
 
 /// ADC Conversion Rates.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum ConversionRate {
     Rate1_16Hz = 0,
@@ -57,7 +57,7 @@ pub enum ConversionRate {
 
 /// ADC Filter Levels.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(u8)]
 pub enum FilterLevel {
     Disabled = 0,
@@ -104,7 +104,7 @@ impl From<Register> for u8 {
 
 /// Device Satuts.
 #[derive(Debug, Clone, Copy, Default)]
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Status {
     pub eeprom_error: bool,
     pub ext_diode_fault: bool,
@@ -139,7 +139,7 @@ pub struct Level {
 }
 
 /// Manual implementation of defmt 'Format' trait, since BoundedU8 does not implement it.
-#[cfg(feature = "defmt-03")]
+#[cfg(feature = "defmt")]
 impl defmt::Format for Level {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(

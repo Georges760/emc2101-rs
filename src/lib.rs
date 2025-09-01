@@ -6,6 +6,7 @@
 pub(crate) mod fmt;
 
 mod error;
+use bounded_integer::BoundedU8;
 pub use error::{Error, Result};
 
 #[cfg(not(any(feature = "sync", feature = "async")))]
@@ -132,10 +133,22 @@ impl From<u8> for Status {
 
 /// Look-up Table Level
 #[derive(Debug, Clone, Copy, Default)]
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
 pub struct Level {
-    pub temp: u8,
-    pub percent: u8,
+    pub temp: BoundedU8<0, 127>,
+    pub step: BoundedU8<0, 63>,
+}
+
+/// Manual implementation of defmt 'Format' trait, since BoundedU8 does not implement it.
+#[cfg(feature = "defmt-03")]
+impl defmt::Format for Level {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(
+            fmt,
+            "Level {{ temp: {=u8}, step: {=u8} }}",
+            self.temp.get(),
+            self.step.get(),
+        );
+    }
 }
 
 /// An EMC2101 sensor on the I2C bus `I`.
@@ -468,15 +481,11 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         Ok(self)
     }
 
-    /// set_fan_power set the FAN power in percent (for both modes PWM/DAC).
-    /// The 'power' must be between 0 and 100%.
+    /// set_fan_power set the FAN power (for both modes PWM/DAC).
+    /// The 'step' must be between 0 and 63.
     /// If Look-up Table was enabled, it will be disabled and the fixed power value will be used.
-    pub async fn set_fan_power(&mut self, percent: u8) -> Result<&mut Self, I::Error> {
+    pub async fn set_fan_power(&mut self, step: BoundedU8<0, 63>) -> Result<&mut Self, I::Error> {
         trace!("set_fan_power");
-        if percent > 100 {
-            error!("Invalid Fan Power.");
-            return Err(Error::InvalidValue);
-        }
         let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
         // FanConfig[5] PROG == 0 :
         // the FanSetting Register and Fan Control Look-Up Table Registers are read-only.
@@ -487,30 +496,26 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             self.write_reg(Register::FanConfig, fan_config | 0x20)
                 .await?;
         }
-        let val: u8 = percent * 64 / 100;
         // The FanSetting Register drives the fan driver when the Fan Control Look-Up
         // Table is not used.
         // Any data written to the FanSetting register is applied immediately to the
         // fan driver (PWM or DAC).
-        self.write_reg(Register::FanSetting, val).await?;
+        self.write_reg(Register::FanSetting, step.get()).await?;
         Ok(self)
     }
 
     /// set_fan_lut set the FAN according to a Look-up Table with hysteresis.
     /// The 'lut' must be 8 or less levels and be ordered with lower temperature value first.
     /// Each level temperature must be between 0 and 127 degrees Celsius.
-    /// Each level power must be between 0 and 100%.
+    /// Each level step must be between 0 and 63.
     pub async fn set_fan_lut(
         &mut self,
         lut: Vec<Level, 8>,
-        hysteresis: u8,
+        hysteresis: BoundedU8<0, 31>,
     ) -> Result<&mut Self, I::Error> {
         trace!("set_fan_lut");
         if lut.is_empty() {
             return Err(Error::InvalidSize);
-        }
-        if hysteresis > 31 {
-            return Err(Error::InvalidValue);
         }
         let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
         // FanConfig[5] PROG == 0 :
@@ -523,27 +528,26 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             self.write_reg(Register::FanConfig, fan_config | 0x20)
                 .await?;
         }
-        let mut last_temp: u8 = 0;
+        let mut last_temp = <BoundedU8<0, 127>>::new(0).unwrap();
         for (index, level) in (0_u8..).zip(lut.iter()) {
-            if level.temp > 127 {
-                return Err(Error::InvalidValue);
-            }
-            if level.percent > 100 {
-                return Err(Error::InvalidValue);
-            }
             if level.temp <= last_temp {
                 return Err(Error::InvalidSorting);
             }
             last_temp = level.temp;
-            self.write_reg((Register::FanControlLUTT1 as u8) + 2 * index, level.temp)
-                .await?;
-            let power: u8 = level.percent * 64 / 100;
-            self.write_reg((Register::FanControlLUTS1 as u8) + 2 * index, power)
-                .await?;
+            self.write_reg(
+                (Register::FanControlLUTT1 as u8) + 2 * index,
+                level.temp.get(),
+            )
+            .await?;
+            self.write_reg(
+                (Register::FanControlLUTS1 as u8) + 2 * index,
+                level.step.get(),
+            )
+            .await?;
         }
         // FanControlLUTHysteresis determines the amount of hysteresis applied to the temperature
         // inputs of the fan control Fan Control Look-Up Table.
-        self.write_reg(Register::FanControlLUTHysteresis, hysteresis)
+        self.write_reg(Register::FanControlLUTHysteresis, hysteresis.get())
             .await?;
         // Clear FanConfig[5] PROG : the FanSetting Register and Fan Control Look-Up Table
         // Registers are read-only and the Fan Control Look-Up Table Registers will be used.

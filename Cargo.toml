@@ -8,7 +8,7 @@ keywords = ["no-std", "embedded-hal-driver", "sensor", "temperature", "fan"]
 license = "MIT OR Apache-2.0"
 name = "emc2101"
 repository = "https://github.com/Georges760/emc2101-rs"
-rust-version = "1.71.1"
+rust-version = "1.88.0"
 version = "2.0.0"
 
 [dependencies]

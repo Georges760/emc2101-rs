@@ -19,7 +19,7 @@ embedded-hal-async = { version = "1.0", optional = true }
 fugit = "0.3"
 heapless = "0.9"
 log = { version = "0.4", optional = true }
-maybe-async-cfg = "0.2"
+maybe-async-cfg2 = { version = "0.3" }
 rustversion = "1.0"
 
 [features]

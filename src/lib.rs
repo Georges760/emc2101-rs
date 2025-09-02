@@ -155,7 +155,7 @@ impl defmt::Format for Level {
 ///
 /// The address of the sensor will be `DEFAULT_ADDRESS` from this package,
 /// unless there is some kind of special address translating hardware in use.
-#[maybe_async_cfg::maybe(
+#[maybe_async_cfg2::maybe(
     sync(feature = "sync", self = "EMC2101"),
     async(feature = "async", keep_self)
 )]
@@ -165,7 +165,7 @@ pub struct AsyncEMC2101<I> {
     variant: Option<Product>,
 }
 
-#[maybe_async_cfg::maybe(
+#[maybe_async_cfg2::maybe(
     sync(
         feature = "sync",
         self = "EMC2101",

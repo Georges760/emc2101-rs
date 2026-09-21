@@ -603,7 +603,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     ) -> Result<(), I::Error> {
         trace!("update_reg");
         let current = self.read_reg(reg.clone()).await?;
-        let updated = current | mask_set & !mask_clear;
+        let updated = (current | mask_set) & !mask_clear;
         if current != updated {
             self.write_reg(reg, updated).await?;
         }
@@ -702,6 +702,75 @@ mod test {
         .unwrap();
         emc2101
             .set_fan_lut(lut, BoundedU8::new(4).unwrap())
+            .unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn monitor_temp_internal_high_unmasks_alert() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::InternalTempLimit as u8, 70]),
+            // AlertMask[6] INT_MSK must be cleared.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::AlertMask as u8],
+                vec![0xFF],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::AlertMask as u8, 0b1011_1111],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101.monitor_temp_internal_high(70).unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn configure_adc_sets_and_clears_filter_bits() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![
+                    Register::ConversionRate as u8,
+                    ConversionRate::Rate1Hz as u8,
+                ],
+            ),
+            // Level2 (FILTER = 11b) with ALERT_COMP set, going to Level1 (FILTER = 01b):
+            // FILTER[1] is cleared, FILTER[0] and ALERT_COMP are kept.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::AveragingFilter as u8],
+                vec![0b0000_0111],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::AveragingFilter as u8, 0b0000_0011],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101
+            .configure_adc(ConversionRate::Rate1Hz, FilterLevel::Level1)
             .unwrap();
 
         let mut mock = emc2101.release();

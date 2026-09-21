@@ -383,78 +383,49 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         Ok(self)
     }
 
-    /// set_fan_pwm set FAN in PWM mode and configure it's base frequency.
+    /// set_fan_pwm set FAN in PWM mode at the given frequency, with the maximum PWM resolution.
+    /// The 'frequency' must be between 23 Hz and 5806 Hz.
+    /// The actual frequency is 360 kHz / (62 * PWM_D), with PWM_D the rounded divider (1 to 252),
+    /// so the available frequencies get coarser at the top of the range (5806 Hz, 2903 Hz, 1935 Hz, ...).
+    /// In PWM mode, a fan step of 62 or 63 gives a 100% duty cycle.
     pub async fn set_fan_pwm(
         &mut self,
         frequency: HertzU32,
         inverted: bool,
     ) -> Result<&mut Self, I::Error> {
         trace!("set_fan_pwm");
-        match frequency.raw() {
-            1_400 => {
-                // Set FanConfig[3] CLK_SEL : The base clock that is used to determine the PWM
-                // frequency is 1.4kHz.
-                // Clear FanConfig[2] CLK_OVR : The base clock frequency is determined by the
-                // CLK_SEL bit.
-                if inverted {
-                    // Set FanConfig[4] POLARITY : The polarity of the Fan output driver is inverted.
-                    // A 0x00 setting will correspond to a 100% duty cycle or maximum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0b0001_1000, 0b0000_0100)
-                        .await?;
-                } else {
-                    // Clear FanConfig[4] POLARITY : The polarity of the Fan output driver is non-inverted.
-                    // A 0x00 setting will correspond to a 0% duty cycle or minimum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0b0000_1000, 0b0001_0100)
-                        .await?;
-                }
-            }
-            360_000 => {
-                // Clear FanConfig[3] CLK_SEL : The base clock that is used to determine the PWM
-                // frequency is 360kHz.
-                // Clear FanConfig[2] CLK_OVR : The base clock frequency is determined by the
-                // CLK_SEL bit.
-                if inverted {
-                    // Set FanConfig[4] POLARITY : The polarity of the Fan output driver is inverted.
-                    // A 0x00 setting will correspond to a 100% duty cycle or maximum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0b0001_0000, 0b0000_1100)
-                        .await?;
-                } else {
-                    // Clear FanConfig[4] POLARITY : The polarity of the Fan output driver is non-inverted.
-                    // A 0x00 setting will correspond to a 0% duty cycle or minimum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0, 0b0001_1100).await?;
-                }
-            }
-            23..=160_000 => {
-                // Set FanConfig[2] CLK_OVR : The base clock that is used to determine the PWM frequency
-                // is set by the Frequency Divide Register.
-                if inverted {
-                    // Set FanConfig[4] POLARITY : The polarity of the Fan output driver is inverted.
-                    // A 0x00 setting will correspond to a 100% duty cycle or maximum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0b0001_0010, 0b0000_1000)
-                        .await?;
-                } else {
-                    // Clear FanConfig[4] POLARITY : The polarity of the Fan output driver is non-inverted.
-                    // A 0x00 setting will correspond to a 0% duty cycle or minimum DAC output voltage.
-                    self.update_reg(Register::FanConfig, 0b0000_0010, 0b0001_1000)
-                        .await?;
-                }
-                // The PWM frequency when the PWMFrequencyDivide Register is used is shown in equation :
-                // PWM_D = (360k / (2 * PWM_F * FREQ))
-                let div: u16 = (160_000u32 / frequency.raw()) as u16;
-                let pwm_f: u8 = (div >> 8) as u8 & 0x1F;
-                let pwm_d: u8 = (div & 0xFF) as u8;
-                // The PWMFrequency Register determines the final PWM frequency and "effective resolution"
-                // of the PWM driver.
-                self.write_reg(Register::PWMFrequency, pwm_f).await?;
-                // When the CLK_OVR bit is set to a logic '1', the PWMFrequencyDivide Register is used in
-                // conjunction with the PWMFrequency Register to determine the final PWM frequency that the
-                // load will see.
-                self.write_reg(Register::PWMFrequencyDivide, pwm_d).await?;
-            }
-            _ => {
-                error!("Invalid PWM Frequency.");
-                return Err(Error::InvalidValue);
-            }
+        // The PWM frequency when the PWMFrequencyDivide Register is used is shown in equation :
+        // FREQ = 360k / (2 * PWM_F * PWM_D)
+        const BASE_CLOCK: u32 = 360_000;
+        // Maximum resolution is achieved by setting the PWMFrequency Register to 1Fh.
+        const PWM_F: u32 = 0x1F;
+        let freq = frequency.raw();
+        // PWM_D[7:0] must stay between 1 and 255.
+        if !(23..=BASE_CLOCK / (2 * PWM_F)).contains(&freq) {
+            error!("Invalid PWM Frequency.");
+            return Err(Error::InvalidValue);
+        }
+        // PWM_D = 360k / (2 * PWM_F * FREQ), rounded to the nearest integer.
+        let pwm_d = (BASE_CLOCK + PWM_F * freq) / (2 * PWM_F * freq);
+        // The PWMFrequency Register determines the final PWM frequency and "effective resolution"
+        // of the PWM driver.
+        self.write_reg(Register::PWMFrequency, PWM_F as u8).await?;
+        // When the CLK_OVR bit is set to a logic '1', the PWMFrequencyDivide Register is used in
+        // conjunction with the PWMFrequency Register to determine the final PWM frequency that the
+        // load will see.
+        self.write_reg(Register::PWMFrequencyDivide, pwm_d as u8)
+            .await?;
+        // Set FanConfig[2] CLK_OVR : The base clock that is used to determine the PWM frequency
+        // is set by the Frequency Divide Register.
+        if inverted {
+            // Set FanConfig[4] POLARITY : The polarity of the Fan output driver is inverted.
+            // A 0x00 setting will correspond to a 100% duty cycle or maximum DAC output voltage.
+            self.update_reg(Register::FanConfig, 0b0001_0100, 0).await?;
+        } else {
+            // Clear FanConfig[4] POLARITY : The polarity of the Fan output driver is non-inverted.
+            // A 0x00 setting will correspond to a 0% duty cycle or minimum DAC output voltage.
+            self.update_reg(Register::FanConfig, 0b0000_0100, 0b0001_0000)
+                .await?;
         }
         // Clear Configuration[4] DAC : PWM output enabled at FAN pin.
         self.update_reg(Register::Configuration, 0, 0b0001_0000)
@@ -808,6 +779,94 @@ mod test {
         emc2101
             .configure_adc(ConversionRate::Rate1Hz, FilterLevel::Level1)
             .unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn set_fan_pwm_uses_frequency_divide_register() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // 25 Hz : PWM_D = 360k / (2 * 31 * 25) = 232.26 -> 232
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::PWMFrequency as u8, 0x1F]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::PWMFrequencyDivide as u8, 232],
+            ),
+            // PROG and POLARITY set : CLK_OVR gets set, POLARITY cleared.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0011_0000],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0010_0100],
+            ),
+            // DAC mode was enabled : it gets cleared.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8],
+                vec![0b0001_0000],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::Configuration as u8, 0]),
+            // 100 Hz inverted : PWM_D = 360k / (2 * 31 * 100) = 58.06 -> 58
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::PWMFrequency as u8, 0x1F]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::PWMFrequencyDivide as u8, 58],
+            ),
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0010_0100],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0011_0100],
+            ),
+            // Already in PWM mode : no write.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8],
+                vec![0],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101.set_fan_pwm(HertzU32::from_raw(25), false).unwrap();
+        emc2101.set_fan_pwm(HertzU32::from_raw(100), true).unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn set_fan_pwm_rejects_out_of_range_frequency() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        for freq in [0, 22, 5_807, 25_000, 360_000] {
+            assert!(matches!(
+                emc2101.set_fan_pwm(HertzU32::from_raw(freq), false),
+                Err(Error::InvalidValue)
+            ));
+        }
 
         let mut mock = emc2101.release();
         mock.done();

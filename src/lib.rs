@@ -551,7 +551,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             .await?;
         // Clear FanConfig[5] PROG : the FanSetting Register and Fan Control Look-Up Table
         // Registers are read-only and the Fan Control Look-Up Table Registers will be used.
-        self.write_reg(Register::FanConfig, fan_config | 0x20)
+        self.write_reg(Register::FanConfig, fan_config & !0x20)
             .await?;
         Ok(self)
     }
@@ -642,6 +642,67 @@ mod test {
         ];
         let mock = i2c::Mock::new(&expectations);
         let emc2101 = EMC2101::new(mock).unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn set_fan_lut_enables_lut_control() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // PROG is clear, so it gets set to unlock the LUT registers.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0000_1000],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0010_1000],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanControlLUTT1 as u8, 30]),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanControlLUTS1 as u8, 20]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanControlLUTT1 as u8 + 2, 60],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanControlLUTS1 as u8 + 2, 63],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanControlLUTHysteresis as u8, 4],
+            ),
+            // PROG must be cleared at the end so the LUT drives the fan (issue #4).
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0000_1000],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        let lut = Vec::<Level, 8>::from_slice(&[
+            Level {
+                temp: BoundedU8::new(30).unwrap(),
+                step: BoundedU8::new(20).unwrap(),
+            },
+            Level {
+                temp: BoundedU8::new(60).unwrap(),
+                step: BoundedU8::new(63).unwrap(),
+            },
+        ])
+        .unwrap();
+        emc2101
+            .set_fan_lut(lut, BoundedU8::new(4).unwrap())
+            .unwrap();
 
         let mut mock = emc2101.release();
         mock.done();

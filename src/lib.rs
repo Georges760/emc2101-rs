@@ -323,9 +323,9 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             .await?;
         self.write_reg(Register::ExternalTempCriticalHysteresis, hysteresis)
             .await?;
-        // Clear AlertMask[4] HIGH_MSK : The External Diode will generate an interrupt if measured temperature
-        // exceeds the External Diode high limit.
-        self.update_reg(Register::AlertMask, 0, 0b0001_0000).await?;
+        // Clear AlertMask[1] TCRIT_MSK : An interrupt will be generated if the External Diode temperature
+        // exceeds the TCRIT limit.
+        self.update_reg(Register::AlertMask, 0, 0b0000_0010).await?;
         Ok(self)
     }
 
@@ -732,6 +732,43 @@ mod test {
         let mut emc2101 = EMC2101::new(mock).unwrap();
 
         emc2101.monitor_temp_internal_high(70).unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn monitor_temp_external_critical_unmasks_tcrit_alert() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::ExternalTempCriticalLimit as u8, 85],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::ExternalTempCriticalHysteresis as u8, 10],
+            ),
+            // AlertMask[1] TCRIT_MSK must be cleared, not AlertMask[4] HIGH_MSK.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::AlertMask as u8],
+                vec![0xFF],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::AlertMask as u8, 0b1111_1101],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101.monitor_temp_external_critical(85, 10).unwrap();
 
         let mut mock = emc2101.release();
         mock.done();

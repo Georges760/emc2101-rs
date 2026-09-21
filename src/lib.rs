@@ -2,7 +2,6 @@
 //! [`embedded-hal`](https://github.com/rust-embedded/embedded-hal) traits.
 
 #![no_std]
-#![macro_use]
 pub(crate) mod fmt;
 
 mod error;

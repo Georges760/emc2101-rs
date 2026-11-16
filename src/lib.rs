@@ -142,6 +142,7 @@ enum Register {
     ExternalTempLimitHigh = 0x07,
     ExternalTempLimitLow = 0x08,
     ExternalTemperatureForce = 0x0C,
+    OneShot = 0x0F,
     ExternalTemperatureLSB = 0x10,
     AlertMask = 0x16,
     ExternalIdealityFactor = 0x17,
@@ -244,6 +245,11 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     ///
     /// This consumes the I2C bus `I`. The address will almost always
     /// be `DEFAULT_ADDRESS` from this crate.
+    ///
+    /// All alerts are disabled, and the rest of the configuration is left as the device holds it.
+    /// The EMC2101 keeps its registers across a reset of the host only, so settings left by a
+    /// previous firmware (standby, fan driver mode, Look-up Table, ...) stay in effect until they
+    /// are set again.
     pub async fn with_address(i2c: I, address: u8) -> Result<Self, I::Error> {
         let mut emc2101 = AsyncEMC2101 {
             i2c,
@@ -256,6 +262,8 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         emc2101.write_reg(Register::AlertMask, 0xFF).await?;
         Ok(emc2101)
     }
+
+    /// Initializes the EMC2101 driver at `DEFAULT_ADDRESS`, see `with_address`.
     pub async fn new(i2c: I) -> Result<Self, I::Error> {
         AsyncEMC2101::with_address(i2c, DEFAULT_ADDRESS).await
     }
@@ -268,6 +276,36 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             EMC2101R_PRODUCT_ID => Ok(Product::EMC2101R),
             _ => Err(Error::InvalidID),
         }
+    }
+
+    /// set_standby put the device in low power standby mode, or back in operational mode.
+    /// In standby mode the temperature monitor is disabled, and the temperature data is only
+    /// updated by one_shot. FAN_STANDBY is not changed, and its default keeps the FAN output active.
+    pub async fn set_standby(&mut self, standby: bool) -> Result<&mut Self, I::Error> {
+        trace!("set_standby");
+        if standby {
+            // Set Configuration[6] STANDBY : Low power standby mode. In this mode, the Temperature
+            // monitor is disabled.
+            self.update_reg(Register::Configuration, 0b0100_0000, 0)
+                .await?;
+        } else {
+            // Clear Configuration[6] STANDBY : Operational mode, monitoring temperatures, updating
+            // FAN output.
+            self.update_reg(Register::Configuration, 0, 0b0100_0000)
+                .await?;
+        }
+        Ok(self)
+    }
+
+    /// one_shot start a single temperature conversion, in standby mode only.
+    /// When the conversion is complete, the temperature data is updated, and so is the fan setting
+    /// if the Look-up Table is used. Status adc_busy is set while the conversion runs.
+    pub async fn one_shot(&mut self) -> Result<&mut Self, I::Error> {
+        trace!("one_shot");
+        // Writing to the OneShot Register initiates a one shot update of the temperature data, when
+        // the temperature monitoring is in standby mode. Data is not relevant and is not stored.
+        self.write_reg(Register::OneShot, 0).await?;
+        Ok(self)
     }
 
     /// status gives the device current status.
@@ -1088,6 +1126,60 @@ mod test {
         // ENABLE set : the BETA bits are ignored.
         assert_eq!(BetaCompensation::try_from(0x0F), Ok(BetaCompensation::Auto));
         assert_eq!(BetaCompensation::try_from(0x10), Err(Error::InvalidValue));
+    }
+
+    #[test]
+    fn set_standby_and_one_shot() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // ALT_TCH set : STANDBY gets set, ALT_TCH kept.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8],
+                vec![0b0000_0100],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8, 0b0100_0100],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::OneShot as u8, 0]),
+            // STANDBY gets cleared, ALT_TCH kept.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8],
+                vec![0b0100_0100],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8, 0b0000_0100],
+            ),
+            // Already operational : no write.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::Configuration as u8],
+                vec![0b0000_0100],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101
+            .set_standby(true)
+            .unwrap()
+            .one_shot()
+            .unwrap()
+            .set_standby(false)
+            .unwrap()
+            .set_standby(false)
+            .unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
     }
 
     #[test]

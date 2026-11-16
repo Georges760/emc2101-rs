@@ -527,17 +527,18 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     }
 
     /// fan_rpm gives the Fan speed in RPM.
+    /// A TACH count of 0 or 0xFFFF gives 0 RPM, and speeds above 65535 RPM are clamped.
     pub async fn fan_rpm(&mut self) -> Result<u16, I::Error> {
         trace!("fan_rpm");
         // TachLSB must be read first: reading it latches TachMSB into a shadow register, and
         // reading TachMSB returns that latched value (Data Read Interlock).
         let lsb = self.read_reg(Register::TachLSB).await?;
         let msb = self.read_reg(Register::TachMSB).await?;
-        let raw: u16 = ((msb as u16) << 8) + (lsb as u16);
-        Ok(if raw == 0xFFFF {
-            0
-        } else {
-            (5_400_000u32 / (raw as u32)) as u16
+        // A count of 0 can't come from a spinning fan and would divide by zero, and counts below 83
+        // give more than u16::MAX RPM.
+        Ok(match u16::from_be_bytes([msb, lsb]) {
+            0 | 0xFFFF => 0,
+            count => u16::try_from(5_400_000 / u32::from(count)).unwrap_or(u16::MAX),
         })
     }
 
@@ -900,6 +901,48 @@ mod test {
 
         // 5_400_000 / 0x0438 (1080 counts) = 5000 RPM.
         assert_eq!(emc2101.fan_rpm().unwrap(), 5000);
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn fan_rpm_handles_out_of_range_counts() {
+        // (TACH count, expected RPM)
+        let cases: [(u16, u16); 5] = [
+            (0x0000, 0),    // would divide by zero (issue #5)
+            (0xFFFF, 0),    // fan stopped
+            (1, u16::MAX),  // 5_400_000 RPM, clamped
+            (82, u16::MAX), // 65853 RPM, clamped
+            (83, 65060),    // largest speed that fits in u16
+        ];
+        let mut expectations = vec![
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+        ];
+        for (count, _) in cases {
+            let [msb, lsb] = count.to_be_bytes();
+            expectations.push(i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::TachLSB as u8],
+                vec![lsb],
+            ));
+            expectations.push(i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::TachMSB as u8],
+                vec![msb],
+            ));
+        }
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        for (count, rpm) in cases {
+            assert_eq!(emc2101.fan_rpm().unwrap(), rpm, "TACH count {}", count);
+        }
 
         let mut mock = emc2101.release();
         mock.done();

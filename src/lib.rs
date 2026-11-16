@@ -529,8 +529,10 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     /// fan_rpm gives the Fan speed in RPM.
     pub async fn fan_rpm(&mut self) -> Result<u16, I::Error> {
         trace!("fan_rpm");
-        let msb = self.read_reg(Register::TachMSB).await?;
+        // TachLSB must be read first: reading it latches TachMSB into a shadow register, and
+        // reading TachMSB returns that latched value (Data Read Interlock).
         let lsb = self.read_reg(Register::TachLSB).await?;
+        let msb = self.read_reg(Register::TachMSB).await?;
         let raw: u16 = ((msb as u16) << 8) + (lsb as u16);
         Ok(if raw == 0xFFFF {
             0
@@ -867,6 +869,37 @@ mod test {
                 Err(Error::InvalidValue)
             ));
         }
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn fan_rpm_reads_tach_low_byte_first() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // Reading TachLSB latches TachMSB, so TachLSB must come first.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::TachLSB as u8],
+                vec![0x38],
+            ),
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::TachMSB as u8],
+                vec![0x04],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        // 5_400_000 / 0x0438 (1080 counts) = 5000 RPM.
+        assert_eq!(emc2101.fan_rpm().unwrap(), 5000);
 
         let mut mock = emc2101.release();
         mock.done();

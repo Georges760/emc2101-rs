@@ -7,21 +7,110 @@ on:
   pull_request:
     branches:
       - master
+  schedule:
+    # Weekly, to catch new RustSec advisories and new stable lints between pushes.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  build:
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-
     steps:
-      - name: Set up Rust
-        uses: actions/checkout@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Build
-        run: cargo build --verbose
-      - name: Test
-        run: cargo test --verbose
-      - name: Clippy
-        run: cargo clippy --verbose -- -D warnings
-      - name: Audit
-        run: cargo audit
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `defmt` and `log` are mutually exclusive, and at least one of `sync`/`async` is required.
+        features:
+          - sync
+          - async
+          - sync,async
+          - sync,async,defmt
+          - sync,async,log
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-default-features --features ${{ matrix.features }} -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The unit tests use the sync API, so every feature set here keeps `sync` (the default).
+      # `defmt` is left out: host test binaries can't link without a defmt global logger.
+      - name: Clippy (tests)
+        run: cargo clippy --all-targets --features async,log -- -D warnings
+      - run: cargo test
+      - run: cargo test --features async,log
+
+  no-std:
+    name: Build no_std (thumbv7m-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target thumbv7m-none-eabi --no-default-features --features sync,async,defmt
+      - run: cargo build --target thumbv7m-none-eabi --no-default-features --features sync,async,log
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    env:
+      # Only prove it builds: lints differ between toolchains.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # `+toolchain` is needed: rust-toolchain.toml would otherwise select stable.
+      - run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --features async,defmt
+      - run: cargo +${{ steps.msrv.outputs.version }} test
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-Dwarnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --features async
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

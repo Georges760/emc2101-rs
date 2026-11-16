@@ -64,6 +64,48 @@ pub enum FilterLevel {
     Level2 = 3,
 }
 
+/// Beta Compensation of the External Diode channel.
+///
+/// The fixed settings are named after the minimum beta of the transistor connected to the External
+/// Diode channel. A factor set above the transistor beta can introduce measurement errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
+pub enum BetaCompensation {
+    Min0_11 = 0,
+    Min0_18 = 1,
+    Min0_25 = 2,
+    Min0_33 = 3,
+    Min0_43 = 4,
+    Min1_00 = 5,
+    Min2_33 = 6,
+    /// For a diode-connected transistor (such as the 2N3904) or a two-terminal diode.
+    Disabled = 7,
+    /// The optimal factor is detected at the beginning of every conversion (default).
+    Auto = 8,
+}
+
+/// Converts a raw BetaCompensation Register value, such as one stored in a configuration.
+/// As on the device, every value with the ENABLE bit set (0x08 to 0x0F) gives `Auto`.
+impl TryFrom<u8> for BetaCompensation {
+    type Error = Error<()>;
+
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
+        Ok(match value {
+            0 => Self::Min0_11,
+            1 => Self::Min0_18,
+            2 => Self::Min0_25,
+            3 => Self::Min0_33,
+            4 => Self::Min0_43,
+            5 => Self::Min1_00,
+            6 => Self::Min2_33,
+            7 => Self::Disabled,
+            8..=15 => Self::Auto,
+            _ => return Err(Error::InvalidValue),
+        })
+    }
+}
+
 /// Registers of the EMC2101 sensor.
 #[cfg(any(feature = "async", feature = "sync"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +121,8 @@ enum Register {
     ExternalTemperatureForce = 0x0C,
     ExternalTemperatureLSB = 0x10,
     AlertMask = 0x16,
+    ExternalIdealityFactor = 0x17,
+    BetaCompensation = 0x18,
     ExternalTempCriticalLimit = 0x19,
     ExternalTempCriticalHysteresis = 0x21,
     TachLSB = 0x46,
@@ -266,6 +310,34 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             _ => return Err(Error::InvalidValue),
         };
         Ok(rate)
+    }
+
+    /// set_ideality_factor set the ideality factor applied to the External Diode, to match a
+    /// diode (such as a processor thermal diode) whose ideality factor differs from 1.008.
+    /// The 'setting' must be between 0x08 (0.9949) and 0x37 (1.0566), the default 0x12 being
+    /// 1.0080. See the Ideality Factor Look-Up Table in the datasheet for every setting.
+    pub async fn set_ideality_factor(
+        &mut self,
+        setting: BoundedU8<0x08, 0x37>,
+    ) -> Result<&mut Self, I::Error> {
+        trace!("set_ideality_factor");
+        // ExternalIdealityFactor[5:0] IDCF : ideality factor applied to the External Diode.
+        self.write_reg(Register::ExternalIdealityFactor, setting.get())
+            .await?;
+        Ok(self)
+    }
+
+    /// set_beta_compensation set the Beta Compensation of the External Diode channel.
+    pub async fn set_beta_compensation(
+        &mut self,
+        beta: BetaCompensation,
+    ) -> Result<&mut Self, I::Error> {
+        trace!("set_beta_compensation");
+        // BetaCompensation[3] ENABLE : set for automatic detection, cleared to use BETA[2:0].
+        // BetaCompensation[2:0] BETA : fixed Beta Compensation factor, 7 disables it.
+        self.write_reg(Register::BetaCompensation, beta as u8)
+            .await?;
+        Ok(self)
     }
 
     /// temp_internal read the internal temperature value in degree Celsius.
@@ -904,6 +976,63 @@ mod test {
 
         let mut mock = emc2101.release();
         mock.done();
+    }
+
+    #[test]
+    fn set_ideality_factor_and_beta_compensation() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::ExternalIdealityFactor as u8, 0x24],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::BetaCompensation as u8, 0x00],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::BetaCompensation as u8, 0x07],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::BetaCompensation as u8, 0x08],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        emc2101
+            .set_ideality_factor(BoundedU8::new(0x24).unwrap())
+            .unwrap()
+            .set_beta_compensation(BetaCompensation::Min0_11)
+            .unwrap()
+            .set_beta_compensation(BetaCompensation::Disabled)
+            .unwrap()
+            .set_beta_compensation(BetaCompensation::Auto)
+            .unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn beta_compensation_from_raw_value() {
+        assert_eq!(BetaCompensation::try_from(0), Ok(BetaCompensation::Min0_11));
+        assert_eq!(BetaCompensation::try_from(6), Ok(BetaCompensation::Min2_33));
+        assert_eq!(
+            BetaCompensation::try_from(7),
+            Ok(BetaCompensation::Disabled)
+        );
+        assert_eq!(BetaCompensation::try_from(8), Ok(BetaCompensation::Auto));
+        // ENABLE set : the BETA bits are ignored.
+        assert_eq!(BetaCompensation::try_from(0x0F), Ok(BetaCompensation::Auto));
+        assert_eq!(BetaCompensation::try_from(0x10), Err(Error::InvalidValue));
     }
 
     #[test]

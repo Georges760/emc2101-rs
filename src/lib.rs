@@ -399,7 +399,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         const BASE_CLOCK: u32 = 360_000;
         // Maximum resolution is achieved by setting the PWMFrequency Register to 1Fh.
         const PWM_F: u32 = 0x1F;
-        let freq = frequency.raw();
+        let freq = frequency.to_raw();
         // PWM_D[7:0] must stay between 1 and 255.
         if !(23..=BASE_CLOCK / (2 * PWM_F)).contains(&freq) {
             error!("Invalid PWM Frequency.");

@@ -230,6 +230,9 @@ pub struct AsyncEMC2101<I> {
     i2c: I,
     address: u8,
     variant: Option<Product>,
+    /// Whether the Fan Control Look-Up Table drives the fan (FanConfig[5] PROG cleared).
+    /// None while unknown: a previous firmware may have left the Look-Up Table in use.
+    lut_active: Option<bool>,
 }
 
 #[maybe_async_cfg2::maybe(
@@ -255,6 +258,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
             i2c,
             address,
             variant: None,
+            lut_active: None,
         };
         trace!("new");
         emc2101.variant = Some(emc2101.check_id().await?);
@@ -621,15 +625,20 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     /// If Look-up Table was enabled, it will be disabled and the fixed power value will be used.
     pub async fn set_fan_power(&mut self, step: BoundedU8<0, 63>) -> Result<&mut Self, I::Error> {
         trace!("set_fan_power");
-        let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
-        // FanConfig[5] PROG == 0 :
-        // the FanSetting Register and Fan Control Look-Up Table Registers are read-only.
-        if fan_config & 0x20 == 0x00 {
-            // Set FanConfig[5] PROG : the FanSetting Register and Fan Control Look-Up
-            // Table Registers can be written and the Fan Control Look-Up Table Registers
-            // will not be used.
-            self.write_reg(Register::FanConfig, fan_config | 0x20)
-                .await?;
+        // FanConfig is only read (and written back) while the Look-Up Table state is unknown or
+        // active, not on every call, so a corrupted read can't be written back from a fan loop.
+        if self.lut_active != Some(false) {
+            let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
+            // FanConfig[5] PROG == 0 :
+            // the FanSetting Register and Fan Control Look-Up Table Registers are read-only.
+            if fan_config & 0x20 == 0x00 {
+                // Set FanConfig[5] PROG : the FanSetting Register and Fan Control Look-Up
+                // Table Registers can be written and the Fan Control Look-Up Table Registers
+                // will not be used.
+                self.write_reg(Register::FanConfig, fan_config | 0x20)
+                    .await?;
+            }
+            self.lut_active = Some(false);
         }
         // The FanSetting Register drives the fan driver when the Fan Control Look-Up
         // Table is not used.
@@ -652,6 +661,8 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         if lut.is_empty() {
             return Err(Error::InvalidSize);
         }
+        // Unknown until the Look-Up Table is fully set, in case of an error midway.
+        self.lut_active = None;
         let fan_config: u8 = self.read_reg(Register::FanConfig).await?;
         // FanConfig[5] PROG == 0 :
         // the FanSetting Register and Fan Control Look-Up Table Registers are read-only
@@ -688,6 +699,7 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
         // Registers are read-only and the Fan Control Look-Up Table Registers will be used.
         self.write_reg(Register::FanConfig, fan_config & !0x20)
             .await?;
+        self.lut_active = Some(true);
         Ok(self)
     }
 
@@ -1126,6 +1138,81 @@ mod test {
         // ENABLE set : the BETA bits are ignored.
         assert_eq!(BetaCompensation::try_from(0x0F), Ok(BetaCompensation::Auto));
         assert_eq!(BetaCompensation::try_from(0x10), Err(Error::InvalidValue));
+    }
+
+    #[test]
+    fn set_fan_power_reads_fan_config_only_when_lut_state_unknown() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // First call : LUT state unknown, a previous firmware left PROG clear.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0000_1000],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0010_1000],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanSetting as u8, 10]),
+            // LUT known inactive : FanConfig is not read again.
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanSetting as u8, 20]),
+            // set_fan_lut : PROG already set, then cleared at the end.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0010_1000],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanControlLUTT1 as u8, 30]),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanControlLUTS1 as u8, 20]),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanControlLUTHysteresis as u8, 4],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0000_1000],
+            ),
+            // LUT active : PROG gets set again, once.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8],
+                vec![0b0000_1000],
+            ),
+            i2c::Transaction::write(
+                DEFAULT_ADDRESS,
+                vec![Register::FanConfig as u8, 0b0010_1000],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanSetting as u8, 30]),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::FanSetting as u8, 40]),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        let lut = Vec::<Level, 8>::from_slice(&[Level {
+            temp: BoundedU8::new(30).unwrap(),
+            step: BoundedU8::new(20).unwrap(),
+        }])
+        .unwrap();
+        emc2101
+            .set_fan_power(BoundedU8::new(10).unwrap())
+            .unwrap()
+            .set_fan_power(BoundedU8::new(20).unwrap())
+            .unwrap()
+            .set_fan_lut(lut, BoundedU8::new(4).unwrap())
+            .unwrap()
+            .set_fan_power(BoundedU8::new(30).unwrap())
+            .unwrap()
+            .set_fan_power(BoundedU8::new(40).unwrap())
+            .unwrap();
+
+        let mut mock = emc2101.release();
+        mock.done();
     }
 
     #[test]

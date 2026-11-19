@@ -420,6 +420,9 @@ impl<I: AsyncI2c + AsyncErrorType> AsyncEMC2101<I> {
     /// temp_external_precise read the external temperature value in degree Celsius.
     pub async fn temp_external_precise(&mut self) -> Result<f32, I::Error> {
         trace!("temp_external_precise");
+        // ExternalTemperatureMSB must be read first: reading it latches ExternalTemperatureLSB into
+        // a shadow register, and reading ExternalTemperatureLSB returns that latched value (Data
+        // Read Interlock).
         let msb = self.read_reg(Register::ExternalTemperatureMSB).await?;
         let lsb = self.read_reg(Register::ExternalTemperatureLSB).await?;
         let raw: i16 = (((msb as u16) << 8) + lsb as u16) as i16;
@@ -1078,6 +1081,38 @@ mod test {
 
         // 5_400_000 / 0x0438 (1080 counts) = 5000 RPM.
         assert_eq!(emc2101.fan_rpm().unwrap(), 5000);
+
+        let mut mock = emc2101.release();
+        mock.done();
+    }
+
+    #[test]
+    fn temp_external_precise_reads_high_byte_first() {
+        let expectations = [
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ProductID as u8],
+                vec![EMC2101_PRODUCT_ID],
+            ),
+            i2c::Transaction::write(DEFAULT_ADDRESS, vec![Register::AlertMask as u8, 0xFF]),
+            // Reading ExternalTemperatureMSB latches ExternalTemperatureLSB, so the MSB must come
+            // first.
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ExternalTemperatureMSB as u8],
+                vec![0x19],
+            ),
+            i2c::Transaction::write_read(
+                DEFAULT_ADDRESS,
+                vec![Register::ExternalTemperatureLSB as u8],
+                vec![0x60],
+            ),
+        ];
+        let mock = i2c::Mock::new(&expectations);
+        let mut emc2101 = EMC2101::new(mock).unwrap();
+
+        // 0x1960 >> 5 = 203 eighths of a degree.
+        assert_eq!(emc2101.temp_external_precise().unwrap(), 25.375);
 
         let mut mock = emc2101.release();
         mock.done();
